@@ -5,10 +5,17 @@ Authors: Kai-Chieh Hsu        ( kaichieh@princeton.edu )
 This module implements the parent class for the Dubins car environments, e.g.,
 one car environment and pursuit-evasion game between two Dubins cars.
 """
+import os
+import sys
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
+
+from networks.mlp import MLP
+from networks.cnn import ConvEncoderMLP
+
 
 import numpy as np
 from .env_utils import calculate_margin_circle, calculate_margin_rect
-from .latent_networks import *
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -76,10 +83,10 @@ class DubinsCarDyn(object):
 
     self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     self.MLP_margin = MLP(3, 1, 256).to(self.device)
-    self.MLP_margin.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/failure_set.pth'))
+    self.MLP_margin.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/classifier/failure_set.pth'))
     self.MLP_margin.eval()  # Set the model to evaluation mode
     self.MLP_dyn = MLP(4, 3, 256).to(self.device)
-    self.MLP_dyn.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/dynamics.pth'))
+    self.MLP_dyn.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/dynamics/dynamics.pth'))
     self.MLP_dyn.eval()  # Set the model to evaluation mode
 
   def set_encoder(self):
@@ -96,13 +103,13 @@ class DubinsCarDyn(object):
     hidden_dim = 256
     #encoder = ConvEncoder(input_shape, cnn_depth, act, norm, kernel_size, minres)
     self.encoder = ConvEncoderMLP(input_shape, cnn_depth, act, norm, kernel_size, minres, out_dim = x_dim, in_dim=1, hidden_dim=hidden_dim, hidden_layer=2).to(self.device)
-    self.encoder.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/encoder_img.pth'))
+    self.encoder.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/dynamics_img/encoder_img.pth'))
 
     self.MLP_margin = MLP(x_dim, 1, hidden_dim).to(self.device)
-    self.MLP_margin.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/failure_set_img.pth'))
+    self.MLP_margin.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/classifier_img/failure_set_img.pth'))
 
     self.MLP_dyn = MLP(x_dim+u_dim, x_dim, hidden_dim).to(self.device)
-    self.MLP_dyn.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/dynamics_img.pth'))
+    self.MLP_dyn.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/dynamics_img/dynamics_img.pth'))
 
 
   def reset(
