@@ -48,15 +48,15 @@ parser.add_argument(
 
 # car dynamics
 parser.add_argument(
-    "-cr", "--consRadius", help="constraint radius", default=1., type=float
+    "-cr", "--consRadius", help="constraint radius", default=0.5, type=float
 )
 parser.add_argument(
     "-tr", "--targetRadius", help="target radius", default=.5, type=float
 )
 parser.add_argument(
-    "-turn", "--turnRadius", help="turning radius", default=.6, type=float
+    "-turn", "--turnRadius", help="turning radius", default=1/1.25, type=float
 )
-parser.add_argument("-s", "--speed", help="speed", default=.5, type=float)
+parser.add_argument("-s", "--speed", help="speed", default=1., type=float)
 
 # training scheme
 parser.add_argument(
@@ -118,6 +118,22 @@ parser.add_argument(
     "-sf", "--storeFigure", help="store figures", action="store_true"
 )
 
+parser.add_argument(
+    "-lm", "--learnedMargin", help="use classifier-based margin", action="store_true"
+)
+
+parser.add_argument(
+    "-ld", "--learnedDyn", help="use learned dynamics", action="store_true"
+)
+
+parser.add_argument(
+    "-img", "--image", help="using image observations", action="store_true"
+)
+
+parser.add_argument(
+    "-d", "--debug", help="dont plot global confusion stats", action="store_true"
+)
+
 args = parser.parse_args()
 print(args)
 
@@ -130,15 +146,6 @@ updatePeriod = int(maxUpdates / updateTimes)
 updatePeriodHalf = int(updatePeriod / 2)
 maxSteps = 100
 
-fn = args.name + '-' + args.doneType
-if args.showTime:
-  fn = fn + '-' + timestr
-
-outFolder = os.path.join(args.outFolder, 'car-DDQN', fn)
-print(outFolder)
-figureFolder = os.path.join(outFolder, 'figure')
-os.makedirs(figureFolder, exist_ok=True)
-
 # == Environment ==
 print("\n== Environment Information ==")
 if args.doneType == 'toEnd':
@@ -150,6 +157,35 @@ env = gym.make(
     env_name, device=device, mode=args.mode, doneType=args.doneType,
     sample_inside_obs=sample_inside_obs
 )
+
+
+fn = args.name + '-' + args.doneType
+if args.showTime:
+  fn = fn + '-' + timestr
+
+if args.learnedMargin:
+  env.car.learned_margin=True
+  fn = fn + '-lm'
+else:
+  env.car.learned_margin=False
+
+if args.learnedDyn:
+  env.car.learned_dyn=True
+  fn = fn + '-ld'
+else:
+  env.car.learned_dyn=False
+
+if args.image:
+  env.car.image=True
+  env.car.set_encoder()
+  fn = fn + '-img'
+if args.debug:
+  env.car.debug = True
+outFolder = os.path.join(args.outFolder, 'car-DDQN', fn)
+print(outFolder)
+figureFolder = os.path.join(outFolder, 'figure')
+os.makedirs(figureFolder, exist_ok=True)
+
 
 stateDim = env.state.shape[0]
 actionNum = env.action_space.n
@@ -195,7 +231,7 @@ if args.plotFigure or args.storeFigure:
   vmax = 1
 
   v = np.zeros((nx, ny))
-  l_x = np.zeros((nx, ny))
+  #l_x = np.zeros((nx, ny))
   g_x = np.zeros((nx, ny))
   xs = np.linspace(env.bounds[0, 0], env.bounds[0, 1], nx)
   ys = np.linspace(env.bounds[1, 0], env.bounds[1, 1], ny)
@@ -207,28 +243,18 @@ if args.plotFigure or args.storeFigure:
     x = xs[idx[0]]
     y = ys[idx[1]]
 
-    l_x[idx] = env.target_margin(np.array([x, y]))
+    #l_x[idx] = env.target_margin(np.array([x, y]))
     g_x[idx] = env.safety_margin(np.array([x, y]))
 
-    v[idx] = np.maximum(l_x[idx], g_x[idx])
+    #v[idx] = np.maximum(l_x[idx], g_x[idx])
+    v[idx] = g_x[idx]
     it.iternext()
 
   axStyle = env.get_axes()
 
-  fig, axes = plt.subplots(1, 3, figsize=(12, 6))
+  fig, axes = plt.subplots(1, 2, figsize=(12, 6))
 
   ax = axes[0]
-  im = ax.imshow(
-      l_x.T, interpolation='none', extent=axStyle[0], origin="lower",
-      cmap="seismic", vmin=vmin, vmax=vmax, zorder=-1
-  )
-  cbar = fig.colorbar(
-      im, ax=ax, pad=0.01, fraction=0.05, shrink=.95, ticks=[vmin, 0, vmax]
-  )
-  cbar.ax.set_yticklabels(labels=[vmin, 0, vmax], fontsize=24)
-  ax.set_title(r'$\ell(x)$', fontsize=18)
-
-  ax = axes[1]
   im = ax.imshow(
       g_x.T, interpolation='none', extent=axStyle[0], origin="lower",
       cmap="seismic", vmin=vmin, vmax=vmax, zorder=-1
@@ -239,7 +265,7 @@ if args.plotFigure or args.storeFigure:
   cbar.ax.set_yticklabels(labels=[vmin, 0, vmax], fontsize=24)
   ax.set_title(r'$g(x)$', fontsize=18)
 
-  ax = axes[2]
+  ax = axes[1]
   im = ax.imshow(
       v.T, interpolation='none', extent=axStyle[0], origin="lower",
       cmap="seismic", vmin=vmin, vmax=vmax, zorder=-1
@@ -325,7 +351,7 @@ vmin = -1
 vmax = 1
 trainRecords, trainProgress = agent.learn(
     env, MAX_UPDATES=maxUpdates, MAX_EP_STEPS=maxSteps, warmupQ=False,
-    doneTerminate=True, vmin=vmin, vmax=vmax, showBool=False,
+    doneTerminate=True, vmin=vmin, vmax=vmax, showBool=True,
     checkPeriod=args.checkPeriod, outFolder=outFolder,
     plotFigure=args.plotFigure, storeFigure=args.storeFigure
 )
@@ -391,8 +417,7 @@ if args.plotFigure or args.storeFigure:
 
     state = np.array([x, y, 0.])
     stateTensor = torch.FloatTensor(state).to(agent.device).unsqueeze(0)
-    action_index = agent.Q_network(stateTensor).min(dim=1)[1].item()
-    # u = env.discrete_controls[action_index]
+    action_index = agent.Q_network(stateTensor).max(dim=1)[1].item()
     actDistMtx[idx] = action_index
 
     _, result, _, _ = env.simulate_one_trajectory(

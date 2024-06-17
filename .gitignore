@@ -1,0 +1,5 @@
+# ignore experiments
+experiments/
+
+# ignore pycache
+*/__pycache__/*

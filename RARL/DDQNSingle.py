@@ -110,7 +110,7 @@ class DDQNSingle(DDQN):
     # to Transition of batch-arrays.
     batch = Transition(*zip(*transitions))
     (non_final_mask, non_final_state_nxt, state, action, reward, g_x,
-     l_x) = self.unpack_batch(batch)
+     ) = self.unpack_batch(batch)
 
     # == get Q(s,a) ==
     # `gather` reguires that idx is Long and input and index should have the
@@ -128,7 +128,7 @@ class DDQNSingle(DDQN):
     with torch.no_grad():
       self.Q_network.eval()
       action_nxt = (
-          self.Q_network(non_final_state_nxt).min(1, keepdim=True)[1]
+          self.Q_network(non_final_state_nxt).max(1, keepdim=True)[1]
       )
 
     # == get expected value ==
@@ -149,22 +149,20 @@ class DDQNSingle(DDQN):
       y = torch.zeros(self.BATCH_SIZE).float().to(self.device)
       final_mask = torch.logical_not(non_final_mask)
       if addBias:  # Bias version:
-        # V(s) = gamma ( max{ g(s), min{ l(s), V_diff(s') } }
+        '''# V(s) = gamma ( max{ g(s), min{ l(s), V_diff(s') } }
         #        - max{ g(s), l(s) } ),
         # where V_diff(s') = V(s') + max{ g(s'), l(s') }
         min_term = torch.min(l_x, state_value_nxt + torch.max(l_x, g_x))
         terminal = torch.max(l_x, g_x)
         non_terminal = torch.max(min_term, g_x) - terminal
         y[non_final_mask] = self.GAMMA * non_terminal[non_final_mask]
-        y[final_mask] = terminal[final_mask]
+        y[final_mask] = terminal[final_mask]'''
+        exit()
       else:
         # Another version (discussed on Feb. 22, 2021):
         # we want Q(s, u) = V( f(s,u) ).
-        non_terminal = torch.max(
-            g_x[non_final_mask],
-            torch.min(l_x[non_final_mask], state_value_nxt[non_final_mask]),
-        )
-        terminal = torch.max(l_x, g_x)
+        non_terminal = torch.min(g_x[non_final_mask], state_value_nxt[non_final_mask])
+        terminal = g_x
 
         # normal state
         y[non_final_mask] = non_terminal * self.GAMMA + terminal[
@@ -506,5 +504,5 @@ class DDQNSingle(DDQN):
     if (np.random.rand() < self.EPSILON) and explore:
       action_index = np.random.randint(0, self.numAction)
     else:
-      action_index = self.Q_network(state).min(dim=1)[1].item()
+      action_index = self.Q_network(state).max(dim=1)[1].item()
     return self.actionList[action_index], action_index

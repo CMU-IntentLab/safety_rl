@@ -93,8 +93,7 @@ class DubinsCarOneEnv(gym.Env):
     # Cost Params
     self.targetScaling = 1.0
     self.safetyScaling = 1.0
-    self.penalty = 1.0
-    self.reward = -1.0
+    self.penalty = -1.0
     self.costType = "sparse"
     self.device = device
     self.scaling = 1.0
@@ -180,34 +179,24 @@ class DubinsCarOneEnv(gym.Env):
 
     state_nxt, _ = self.car.step(action)
     self.state = state_nxt
-    l_x = self.target_margin(self.state[:2])
     g_x = self.safety_margin(self.state[:2])
 
-    fail = g_x > 0
-    success = l_x <= 0
+    fail = g_x < 0
 
     # cost
     if self.mode == "RA":
       if fail:
         cost = self.penalty
-      elif success:
-        cost = self.reward
       else:
         cost = 0.0
     else:
       if fail:
         cost = self.penalty
-      elif success:
-        cost = self.reward
       else:
-        if self.costType == "dense_ell":
-          cost = l_x
-        elif self.costType == "dense_ell_g":
-          cost = l_x + g_x
+        if self.costType == "dense_g":
+          cost = g_x
         elif self.costType == "sparse":
           cost = 0.0 * self.scaling
-        elif self.costType == "max_ell_g":
-          cost = max(l_x, g_x)
         else:
           cost = 0.0
 
@@ -216,16 +205,14 @@ class DubinsCarOneEnv(gym.Env):
       done = not self.car.check_within_bounds(self.state)
     elif self.doneType == "fail":
       done = fail
-    elif self.doneType == "TF":
-      done = fail or success
     else:
       raise ValueError("invalid done type!")
 
     # = `info`
     if done and self.doneType == "fail":
-      info = {"g_x": self.penalty * self.scaling, "l_x": l_x}
+      info = {"g_x": self.penalty * self.scaling}
     else:
-      info = {"g_x": g_x, "l_x": l_x}
+      info = {"g_x": g_x} 
     return np.copy(self.state), cost, done, info
 
   # == Setting Hyper-Parameter Functions ==
@@ -382,7 +369,7 @@ class DubinsCarOneEnv(gym.Env):
         float: negative numbers indicate reaching the target. If the target set
             is not specified, return None.
     """
-    return self.car.target_margin(s[:2])
+    raise Exception('no target margin!')
 
   # == Getting Functions ==
   def get_warmup_examples(self, num_warmup_samples=100):
@@ -405,9 +392,8 @@ class DubinsCarOneEnv(gym.Env):
 
     for i in range(num_warmup_samples):
       x, y, theta = x_rnd[i], y_rnd[i], theta_rnd[i]
-      l_x = self.target_margin(np.array([x, y]))
       g_x = self.safety_margin(np.array([x, y]))
-      heuristic_v[i, :] = np.maximum(l_x, g_x)
+      heuristic_v[i, :] = g_x
       states[i, :] = x, y, theta
 
     return states, heuristic_v
@@ -429,7 +415,20 @@ class DubinsCarOneEnv(gym.Env):
     ])
     return [axes, aspect_ratio]
 
-  def get_value(self, q_func, theta, nx=101, ny=101, addBias=False):
+  def get_grid_value(self, grid):
+    nx = np.shape(grid)[0]
+    ny = np.shape(grid)[1]
+    nz = np.shape(grid)[2]
+
+    v = np.zeros((nx, ny, nz))
+    it = np.nditer(v, flags=["multi_index"])
+    while not it.finished:
+      idx = it.multi_index
+      v[idx] = grid[idx[0],idx[1], idx[2]]
+      it.iternext()
+    return v
+
+  def get_value(self, q_func, theta, nx=101, ny=101, nz=None, grid=None, addBias=False):
     """
     Gets the state values given the Q-network. We fix the heading angle of the
     car to `theta`.
@@ -445,30 +444,54 @@ class DubinsCarOneEnv(gym.Env):
     Returns:
         np.ndarray: values
     """
-    v = np.zeros((nx, ny))
+    if nz is not None:
+      v = np.zeros((nx, ny, nz))
+    else:
+      v = np.zeros((nx, ny))
     it = np.nditer(v, flags=["multi_index"])
-    xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
-    ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
+    xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx, endpoint=True)
+    ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny, endpoint=True)
+    if nz is not None:
+      thetas= np.linspace(-np.pi, np.pi, nz, endpoint=True)
+      tn, tp, fn, fp = 0, 0, 0, 0
+      
     while not it.finished:
       idx = it.multi_index
       x = xs[idx[0]]
       y = ys[idx[1]]
-      l_x = self.target_margin(np.array([x, y]))
+      if nz is not None:
+        theta = thetas[idx[2]]
       g_x = self.safety_margin(np.array([x, y]))
 
       if self.mode == "normal" or self.mode == "RA":
         state = (torch.FloatTensor([x, y, theta]).to(self.device).unsqueeze(0))
       else:
-        z = max([l_x, g_x])
+        z = g_x
         state = (
             torch.FloatTensor([x, y, theta, z]).to(self.device).unsqueeze(0)
         )
       if addBias:
-        v[idx] = q_func(state).min(dim=1)[0].item() + max(l_x, g_x)
+        v[idx] = q_func(state).max(dim=1)[0].item() + g_x
       else:
-        v[idx] = q_func(state).min(dim=1)[0].item()
+        v[idx] = q_func(state).max(dim=1)[0].item()
+
+      if grid is not None:
+        v_grid = grid[idx[0], idx[1], idx[2]]
+        if v[idx] < 0 and v_grid < 0:
+          tn += 1
+        if v[idx] > 0 and v_grid > 0:
+          tp += 1
+        if v[idx] < 0 and v_grid > 0:
+          fn += 1
+        if v[idx] > 0 and v_grid < 0:
+          fp += 1
+
       it.iternext()
-    return v
+    if grid is not None:
+      tot = tp + tn + fp + fn
+      return v, tp/tot, tn/tot, fp/tot, fn/tot
+    else:
+      return v
 
   # == Trajectory Functions ==
   def simulate_one_trajectory(
@@ -514,21 +537,14 @@ class DubinsCarOneEnv(gym.Env):
       traj.append(state)
 
       g_x = self.safety_margin(state)
-      l_x = self.target_margin(state)
-
       # = Rollout Record
       if t == 0:
-        maxG = g_x
-        current = max(l_x, maxG)
-        minV = current
+        minV = g_x #current
       else:
-        maxG = max(maxG, g_x)
-        current = max(l_x, maxG)
-        minV = min(current, minV)
+        minV = min(g_x, minV)
 
       valueList.append(minV)
       gxList.append(g_x)
-      lxList.append(l_x)
 
       if toEnd:
         done = not self.car.check_within_bounds(state)
@@ -536,16 +552,13 @@ class DubinsCarOneEnv(gym.Env):
           result = 1
           break
       else:
-        if g_x > 0:
-          result = -1  # failed
-          break
-        elif l_x <= 0:
-          result = 1  # succeeded
+        if g_x < 0:
+          result = -1 # failed
           break
 
       q_func.eval()
       state_tensor = (torch.FloatTensor(state).to(self.device).unsqueeze(0))
-      action_index = q_func(state_tensor).min(dim=1)[1].item()
+      action_index = q_func(state_tensor).max(dim=1)[1].item()
       u = self.car.discrete_controls[action_index]
 
       state = self.car.integrate_forward(state, u)
@@ -651,15 +664,23 @@ class DubinsCarOneEnv(gym.Env):
             Defaults to False.
         num_rnd_traj (int, optional): #trajectories. Defaults to None.
     """
-    thetaList = [np.pi / 6, np.pi / 3, np.pi / 2]
-    fig = plt.figure(figsize=(12, 4))
+    thetaList = [0, np.pi / 6, np.pi / 3]
+    fig = plt.figure(figsize=(12, 4.5))
     ax1 = fig.add_subplot(131)
     ax2 = fig.add_subplot(132)
     ax3 = fig.add_subplot(133)
     axList = [ax1, ax2, ax3]
 
+    path = '/home/kensuke/optimized_dp/LS_BRT_v05_w0833.npy'
+    grid = np.load(path)
+    nx_g = np.shape(grid)[0]
+    ny_g = np.shape(grid)[1]
+    nz_g = np.shape(grid)[2]
+    if not self.car.debug:
+      v_nn, tp_g, tn_g, fp_g, fn_g = self.get_value(q_func, None, nx_g, ny_g, nz = nz_g, grid = grid, addBias=addBias)
+      fig.suptitle(r"$TP={:.0f}\%$ ".format(tp_g * 100) + r"$TN={:.0f}\%$ ".format(tn_g * 100) + r"$FP={:.0f}\%$ ".format(fp_g * 100) +r"$FN={:.0f}\%$".format(fn_g * 100),
+            fontsize=10,)
     for i, (ax, theta) in enumerate(zip(axList, thetaList)):
-      # for i, (ax, theta) in enumerate(zip(self.axes, thetaList)):
       ax.cla()
       if i == len(thetaList) - 1:
         cbarPlot = True
@@ -669,11 +690,11 @@ class DubinsCarOneEnv(gym.Env):
       # == Plot failure / target set ==
       self.plot_target_failure_set(ax)
 
-      # == Plot reach-avoid set ==
-      self.plot_reach_avoid_set(ax, orientation=theta)
+      # == Plot grid value ==
+      v_grid = self.plot_grid_values(ax, orientation=theta, path=path)
 
       # == Plot V ==
-      self.plot_v_values(
+      v_nn = self.plot_v_values(
           q_func,
           ax=ax,
           fig=fig,
@@ -686,7 +707,10 @@ class DubinsCarOneEnv(gym.Env):
           boolPlot=boolPlot,
           cbarPlot=cbarPlot,
           addBias=addBias,
+          nx_grid = np.shape(v_grid)[0],
+          ny_grid = np.shape(v_grid)[1],
       )
+      tn,tp,fn,fp = self.confusion(v_nn, v_grid)
       # == Formatting ==
       self.plot_formatting(ax=ax, labels=labels)
 
@@ -719,15 +743,59 @@ class DubinsCarOneEnv(gym.Env):
 
       ax.set_xlabel(
           r"$\theta={:.0f}^\circ$".format(theta * 180 / np.pi),
-          fontsize=28,
+          fontsize=20,
+      )
+      ax.set_title(
+          r"$TP={:.0f}\%$ ".format(tp * 100) + r"$TN={:.0f}\%$ ".format(tn * 100) + r"$FP={:.0f}\%$ ".format(fp * 100) +r"$FN={:.0f}\%$".format(fn * 100),
+          fontsize=10,
       )
 
     plt.tight_layout()
 
+  def plot_grid_values(self, ax, orientation, path, fig=None, vmin=-1, vmax=1, cmap="seismic"):
+    axStyle = self.get_axes()
+    grid = np.load(path)
+    nx = np.shape(grid)[0]
+    ny = np.shape(grid)[1]
+    nz = np.shape(grid)[2]
+    lin = np.linspace(-np.pi, np.pi, num=nz,endpoint=True)
+    diff_lin = np.abs(lin-orientation)
+    idx = np.argmin(diff_lin)
+    diff = lin[idx]-orientation
+    if diff > 0:
+        idx2 = idx-1
+        diff2 = orientation - lin[idx2]
+        w2 = diff /(diff+diff2)
+    else:
+        idx2 = idx+1
+        diff2 = lin[idx2] - orientation
+        w2 = -diff / (-diff + diff2)
+    w1 = 1-w2
+    v_grid = self.get_grid_value(grid)
+    v1 = v_grid[:,:,idx]
+    v2 = v_grid[:,:,idx2]
+    v = w1*v1 + w2*v2
+
+    ## PLOT THE ZERO LEVEL SET OF V
+    im = ax.imshow(
+          v.T > 0.0,
+          interpolation="none",
+          extent=axStyle[0],
+          origin="lower",
+          cmap=cmap,
+          alpha=0.5,
+          zorder=-1,
+    )
+    X = np.linspace(self.bounds[0,0], self.bounds[0,1], nx)
+    Y = np.linspace(self.bounds[1,0], self.bounds[1,1], ny)
+    X, Y = np.meshgrid(X, Y)
+    ax.contour(X, Y, v.T, levels=[0], colors='white', linewidths=2, zorder=1)
+    return v
+
   def plot_v_values(
       self, q_func, theta=np.pi / 2, ax=None, fig=None, vmin=-1, vmax=1,
       nx=201, ny=201, cmap="seismic", boolPlot=False, cbarPlot=True,
-      addBias=False
+      addBias=False, nx_grid = 40, ny_grid=40
   ):
     """Plots state values.
 
@@ -787,6 +855,26 @@ class DubinsCarOneEnv(gym.Env):
             ticks=[vmin, 0, vmax],
         )
         cbar.ax.set_yticklabels(labels=[vmin, 0, vmax], fontsize=16)
+    return self.get_value(q_func, theta, nx_grid, ny_grid, addBias=addBias)
+
+  def confusion(self, v_nn, v_grid):
+    it = np.nditer(v_nn, flags=["multi_index"])
+    tn, tp, fn, fp = 0,0,0,0
+    while not it.finished:
+      idx = it.multi_index
+      
+      if v_nn[idx] < 0 and v_grid[idx] < 0:
+        tn += 1
+      if v_nn[idx] > 0 and v_grid[idx] > 0:
+        tp += 1
+      if v_nn[idx] < 0 and v_grid[idx] > 0:
+        fn += 1
+      if v_nn[idx] > 0 and v_grid[idx] < 0:
+        fp += 1
+
+      it.iternext()
+    tot = tn+tp+fn+fp
+    return tn/tot, tp/tot, fn/tot, fp/tot
 
   def plot_trajectories(
       self, q_func, T=100, num_rnd_traj=None, states=None, theta=None,
@@ -860,14 +948,6 @@ class DubinsCarOneEnv(gym.Env):
         self.constraint_radius,
         ax,
         c=c_c,
-        lw=lw,
-        zorder=zorder,
-    )
-    plot_circle(
-        self.target_center,
-        self.target_radius,
-        ax,
-        c=c_t,
         lw=lw,
         zorder=zorder,
     )

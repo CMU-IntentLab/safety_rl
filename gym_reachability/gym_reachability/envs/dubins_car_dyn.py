@@ -8,7 +8,15 @@ one car environment and pursuit-evasion game between two Dubins cars.
 
 import numpy as np
 from .env_utils import calculate_margin_circle, calculate_margin_rect
+from .latent_networks import *
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import matplotlib.pyplot as plt 
+import matplotlib.patches as patches
 
+import io
+from PIL import Image
 
 class DubinsCarDyn(object):
   """
@@ -28,6 +36,11 @@ class DubinsCarDyn(object):
     self.bounds = np.array([[-1.1, 1.1], [-1.1, 1.1], [0, 2 * np.pi]])
     self.low = self.bounds[:, 0]
     self.high = self.bounds[:, 1]
+
+    self.learned_margin = False
+    self.learned_dyn = False
+    self.image = False
+    self.debug = False
 
     # Dubins car parameters.
     self.alive = True
@@ -60,6 +73,37 @@ class DubinsCarDyn(object):
     # Cost Params
     self.targetScaling = 1.
     self.safetyScaling = 1.
+
+    self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    self.MLP_margin = MLP(3, 1, 256).to(self.device)
+    self.MLP_margin.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/failure_set.pth'))
+    self.MLP_margin.eval()  # Set the model to evaluation mode
+    self.MLP_dyn = MLP(4, 3, 256).to(self.device)
+    self.MLP_dyn.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/dynamics.pth'))
+    self.MLP_dyn.eval()  # Set the model to evaluation mode
+
+  def set_encoder(self):
+    self.image = True
+    act = 'SiLU'
+    norm = True
+    cnn_depth = 32
+    kernel_size = 4 
+    minres = 4
+    img_size = 64
+    input_shape = (img_size, img_size, 3)
+    x_dim = 3 # x, y, cos(theta), sin(theta)
+    u_dim = 1
+    hidden_dim = 256
+    #encoder = ConvEncoder(input_shape, cnn_depth, act, norm, kernel_size, minres)
+    self.encoder = ConvEncoderMLP(input_shape, cnn_depth, act, norm, kernel_size, minres, out_dim = x_dim, in_dim=1, hidden_dim=hidden_dim, hidden_layer=2).to(self.device)
+    self.encoder.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/encoder_img.pth'))
+
+    self.MLP_margin = MLP(x_dim, 1, hidden_dim).to(self.device)
+    self.MLP_margin.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/failure_set_img.pth'))
+
+    self.MLP_dyn = MLP(x_dim+u_dim, x_dim, hidden_dim).to(self.device)
+    self.MLP_dyn.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/dynamics_img.pth'))
+
 
   def reset(
       self, start=None, theta=None, sample_inside_obs=False,
@@ -116,18 +160,53 @@ class DubinsCarDyn(object):
     flag = True
     while flag:
       rnd_state = np.random.uniform(low=self.low[:2], high=self.high[:2])
-      l_x = self.target_margin(rnd_state)
-      g_x = self.safety_margin(rnd_state)
+      if self.image:
+        img = self.get_image(rnd_state, theta_rnd)
+        img = torch.tensor([img/256.]).float().to(self.device)
+        embed = self.encoder(img, torch.tensor([theta_rnd]).float().to(self.device)).detach().cpu().numpy().squeeze()
+        g_x = self.safety_margin(embed)
+      else:
+        #l_x = self.target_margin(rnd_state)
+        g_x = self.safety_margin(rnd_state)
 
-      if (not sample_inside_obs) and (g_x > 0):
+      #if (not sample_inside_obs) and (g_x > 0):
+      if (not sample_inside_obs) and (g_x < 0):
         flag = True
-      elif (not sample_inside_tar) and (l_x <= 0):
-        flag = True
+      #elif (not sample_inside_tar) and (l_x <= 0):
+      #  flag = True
       else:
         flag = False
     x_rnd, y_rnd = rnd_state
-
+    if self.image:
+      x_rnd, y_rnd, theta_rnd = embed[0], embed[1], embed[2]
+    
     return x_rnd, y_rnd, theta_rnd
+
+  def get_image(self, state, theta):
+    x, y = state
+    fig,ax = plt.subplots()
+    plt.xlim([-1.1, 1.1])
+    plt.ylim([-1.1, 1.1])
+    plt.axis('off')
+    dpi=64
+    fig.set_size_inches( 1, 1 )
+    # Create the circle patch
+    circle = patches.Circle((0,0), (0.5), edgecolor=(1,0,0), facecolor='none')
+    # Add the circle patch to the axis
+    ax.add_patch(circle)
+    plt.quiver(x, y, self.time_step*self.speed*math.cos(theta), self.time_step*self.speed*math.sin(theta), angles='xy', scale_units='xy', minlength=0,width=0.05, scale=0.2,color=(0,0,1), zorder=3)
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    buf = io.BytesIO()
+    plt.savefig('test.png', dpi=dpi)
+    plt.savefig(buf, format='png', dpi=dpi)
+    buf.seek(0)
+
+    # Load the buffer content as an RGB image
+    img = Image.open(buf).convert('RGB')
+    img_array = np.array(img)
+    plt.close()
+    return img_array
 
   # == Dynamics ==
   def step(self, action):
@@ -152,10 +231,8 @@ class DubinsCarDyn(object):
       done = not self.check_within_bounds(self.state)
     else:
       assert self.doneType == 'TF', 'invalid doneType'
-      fail = g_x_cur > 0
-      success = l_x_cur <= 0
-      done = fail or success
-
+      fail = g_x_cur < 0
+      done = fail 
     if done:
       self.alive = False
 
@@ -173,12 +250,20 @@ class DubinsCarDyn(object):
     """
     x, y, theta = state
 
-    x = x + self.time_step * self.speed * np.cos(theta)
-    y = y + self.time_step * self.speed * np.sin(theta)
-    theta = np.mod(theta + self.time_step * u, 2 * np.pi)
-
-    state = np.array([x, y, theta])
-    return state
+    if self.learned_dyn:
+      inp = torch.Tensor([x,y,theta, u/self.max_turning_rate]).to(self.device)
+      delta = self.MLP_dyn(inp).detach().cpu().numpy()
+      delta[:2] *= self.speed*self.time_step
+      delta[2] *= self.max_turning_rate*self.time_step
+      state_next = state + delta
+      state_next[2] = np.mod(state_next[2], 2 * np.pi)
+    else:
+      x = x + self.time_step * self.speed * np.cos(theta)
+      y = y + self.time_step * self.speed * np.sin(theta)
+      theta = np.mod(theta + self.time_step * u, 2 * np.pi)
+      state_next = np.array([x, y, theta])
+      
+    return state_next
 
   # == Setting Hyper-Parameter Functions ==
   def set_bounds(self, bounds):
@@ -302,16 +387,23 @@ class DubinsCarDyn(object):
     )
     g_xList = [boundary_margin]
 
-    c_c_exists = (self.constraint_center is not None)
-    c_r_exists = (self.constraint_radius is not None)
-    if (c_c_exists and c_r_exists):
-      g_x = calculate_margin_circle(
-          s, [self.constraint_center, self.constraint_radius],
-          negativeInside=True
-      )
-      g_xList.append(g_x)
-
+    if self.learned_margin:
+      s_tensor = torch.Tensor([s[0], s[1], 0])
+      with torch.no_grad():  # Disable gradient calculation
+        outputs = self.MLP_margin(s_tensor.to(self.device)).item()
+        g_xList.append(outputs)
+    else:
+      c_c_exists = (self.constraint_center is not None)
+      c_r_exists = (self.constraint_radius is not None)
+      if (c_c_exists and c_r_exists):
+        g_x = calculate_margin_circle(
+            s, [self.constraint_center, self.constraint_radius],
+            negativeInside=True
+        )
+        g_xList.append(g_x)
+    
     safety_margin = np.max(np.array(g_xList))
+
     return self.safetyScaling * safety_margin
 
   def target_margin(self, s):
