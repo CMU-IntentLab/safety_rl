@@ -21,6 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt 
 import matplotlib.patches as patches
+import math 
 
 import io
 from PIL import Image
@@ -32,7 +33,7 @@ class DubinsCarDyn(object):
   boundary, while the outer circle is the boundary of the constraint set.
   """
 
-  def __init__(self, doneType='toEnd'):
+  def __init__(self, config, doneType='toEnd'):
     """Initializes the environment with the episode termination criterion.
 
     Args:
@@ -40,7 +41,7 @@ class DubinsCarDyn(object):
             training. Defaults to 'toEnd'.
     """
     # State bounds.
-    self.bounds = np.array([[-1.1, 1.1], [-1.1, 1.1], [0, 2 * np.pi]])
+    self.bounds = np.array([[config['x_min'], config['x_max']], [config['y_min'], config['y_max']], [0, 2 * np.pi]])
     self.low = self.bounds[:, 0]
     self.high = self.bounds[:, 1]
 
@@ -51,12 +52,12 @@ class DubinsCarDyn(object):
 
     # Dubins car parameters.
     self.alive = True
-    self.time_step = 0.05
-    self.speed = 0.5  # v
+    self.time_step = config['dt']
+    self.speed = config['speed']  # v
 
     # Control parameters.
-    self.R_turn = .6
-    self.max_turning_rate = self.speed / self.R_turn  # w
+    self.max_turning_rate = config['u_max'] # w
+    self.R_turn = self.speed / self.max_turning_rate 
     self.discrete_controls = np.array([
         -self.max_turning_rate, 0., self.max_turning_rate
     ])

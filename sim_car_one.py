@@ -154,7 +154,7 @@ elif args.doneType == 'TF' or args.doneType == 'fail':
   sample_inside_obs = False
 
 env = gym.make(
-    env_name, device=device, mode=args.mode, doneType=args.doneType,
+    env_name, config=config, device=device, mode=args.mode, doneType=args.doneType,
     sample_inside_obs=sample_inside_obs
 )
 

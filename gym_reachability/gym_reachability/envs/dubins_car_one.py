@@ -24,8 +24,8 @@ class DubinsCarOneEnv(gym.Env):
   """
 
   def __init__(
-      self, device, mode="RA", doneType="toEnd", sample_inside_obs=False,
-      sample_inside_tar=True
+      self, device, config=None, mode="RA", doneType="toEnd", sample_inside_obs=False,
+      sample_inside_tar=True,
   ):
     """Initializes the environment with given arguments.
 
@@ -60,11 +60,11 @@ class DubinsCarOneEnv(gym.Env):
     )
 
     # Constraint set parameters.
-    self.constraint_center = np.array([0, 0])
-    self.constraint_radius = 1.0
+    self.constraint_center = np.array([config['obs_x'], config['obs_y']])
+    self.constraint_radius = config['obs_r']
 
     # Target set parameters.
-    self.target_center = np.array([0, 0])
+    self.target_center = np.array([config['obs_x'], config['obs_y']])
     self.target_radius = 0.3
 
     # Internal state.
@@ -73,10 +73,10 @@ class DubinsCarOneEnv(gym.Env):
     self.doneType = doneType
 
     # Dubins car parameters.
-    self.time_step = 0.05
-    self.speed = 0.5  # v
-    self.R_turn = 0.6
-    self.car = DubinsCarDyn(doneType=doneType)
+    self.time_step = config['dt']
+    self.speed = config['speed']  # v
+    self.R_turn = config['speed'] / config['u_max']
+    self.car = DubinsCarDyn(config, doneType=doneType)
     self.init_car()
 
     # Visualization params
