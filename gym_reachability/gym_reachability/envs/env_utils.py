@@ -44,7 +44,10 @@ def calculate_margin_circle(s, c_r, negativeInside=True):
         float: margin.
     """
   center, radius = c_r
-  dist_to_center = np.linalg.norm(s[:2] - center)
+  if len(np.shape(s)) == 2:
+    dist_to_center = np.linalg.norm(s[:2,:] - np.array(center)[:,None], axis=0)
+  else:
+    dist_to_center = np.linalg.norm(s[:2] - center)
   margin = dist_to_center - radius
 
   if negativeInside:

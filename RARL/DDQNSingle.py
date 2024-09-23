@@ -112,6 +112,11 @@ class DDQNSingle(DDQN):
     (non_final_mask, non_final_state_nxt, state, action, reward, g_x,
      ) = self.unpack_batch(batch)
 
+    non_final_mask = non_final_mask.squeeze()
+    non_final_state_nxt = non_final_state_nxt.squeeze()
+    state = state.squeeze()
+    action = action.squeeze().unsqueeze(1)
+    g_x = g_x.squeeze()
     # == get Q(s,a) ==
     # `gather` reguires that idx is Long and input and index should have the
     # same shape with only difference at the dimension we want to extract.
@@ -120,6 +125,7 @@ class DDQNSingle(DDQN):
     # -> state_action_values = Q [ i ][ action[i] ]
     # view(-1): from mtx to vector
     self.Q_network.train()
+    state = state.squeeze()
     state_action_values = (
         self.Q_network(state).gather(dim=1, index=action).view(-1)
     )
@@ -205,12 +211,18 @@ class DDQNSingle(DDQN):
       cnt += 1
       print("\rWarmup Buffer [{:d}]".format(cnt), end="")
       s = env.reset()
+      if type(s) == dict:
+        s = s["state"]
       a, a_idx = self.select_action(s, explore=True)
       s_, r, done, info = env.step(a_idx)
+      if type(s_) == dict:
+        s_ = s_["state"]
       s_ = None if done else s_
       self.store_transition(s, a_idx, r, s_, info)
       if done:
         s = env.reset()
+        if type(s) == dict:
+          s = s["state"]
       else:
         s = s_
     print(" --- Warmup Buffer Ends")
@@ -281,7 +293,8 @@ class DDQNSingle(DDQN):
         self.Q_network.state_dict()
     )  # hard replace
     self.build_optimizer()
-
+    print('Loss List')
+    print(lossList)
     return lossList
 
   def learn(
@@ -375,6 +388,8 @@ class DDQNSingle(DDQN):
 
     while self.cntUpdate <= MAX_UPDATES:
       s = env.reset()
+      if type(s) == dict:
+        s = s["state"]
       epCost = 0.0
       ep += 1
       # Rollout
@@ -384,6 +399,8 @@ class DDQNSingle(DDQN):
 
         # Interact with env
         s_, r, done, info = env.step(a_idx)
+        if type(s_) == dict:
+          s_ = s_["state"]
         s_ = None if done else s_
         epCost += r
 
@@ -500,7 +517,7 @@ class DDQNSingle(DDQN):
     """
     self.Q_network.eval()
     # tensor.min() returns (value, indices), which are in the tensor form.
-    state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+    state = torch.from_numpy(state).float().squeeze().unsqueeze(0).to(self.device)
     if (np.random.rand() < self.EPSILON) and explore:
       action_index = np.random.randint(0, self.numAction)
     else:

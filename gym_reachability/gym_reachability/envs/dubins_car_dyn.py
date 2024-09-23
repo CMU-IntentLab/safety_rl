@@ -41,7 +41,7 @@ class DubinsCarDyn(object):
             training. Defaults to 'toEnd'.
     """
     # State bounds.
-    self.bounds = np.array([[config['x_min'], config['x_max']], [config['y_min'], config['y_max']], [0, 2 * np.pi]])
+    self.bounds = np.array([[config.x_min, config.x_max], [config.y_min, config.y_max], [0, 2 * np.pi]])
     self.low = self.bounds[:, 0]
     self.high = self.bounds[:, 1]
 
@@ -49,14 +49,17 @@ class DubinsCarDyn(object):
     self.learned_dyn = False
     self.image = False
     self.debug = False
+    self.use_wm = False
+    self.gt_lx = False
+
 
     # Dubins car parameters.
     self.alive = True
-    self.time_step = config['dt']
-    self.speed = config['speed']  # v
+    self.time_step = config.dt
+    self.speed = config.speed  # v
 
     # Control parameters.
-    self.max_turning_rate = config['u_max'] # w
+    self.max_turning_rate = config.u_max # w
     self.R_turn = self.speed / self.max_turning_rate 
     self.discrete_controls = np.array([
         -self.max_turning_rate, 0., self.max_turning_rate
@@ -97,9 +100,10 @@ class DubinsCarDyn(object):
     cnn_depth = 32
     kernel_size = 4 
     minres = 4
-    img_size = 64
+    img_size = 128
     input_shape = (img_size, img_size, 3)
-    x_dim = 3 # x, y, cos(theta), sin(theta)
+    x_dim = 128 # x, y, cos(theta), sin(theta)
+    
     u_dim = 1
     hidden_dim = 256
     #encoder = ConvEncoder(input_shape, cnn_depth, act, norm, kernel_size, minres)
@@ -111,6 +115,18 @@ class DubinsCarDyn(object):
 
     self.MLP_dyn = MLP(x_dim+u_dim, x_dim, hidden_dim).to(self.device)
     self.MLP_dyn.load_state_dict(torch.load('/home/kensuke/latent-safety/logs/dynamics_img/dynamics_img.pth'))
+
+  def set_wm(self, wm, lx, config):
+    self.encoder = wm.encoder.to(self.device)
+    self.MLP_margin = lx.to(self.device)
+    self.MLP_dyn = wm.dynamics.to(self.device)
+    self.wm = wm.to(self.device)
+    self.use_wm = True
+    if config.wm:
+      if config.dyn_discrete:
+        self.feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
+      else:
+        self.feat_size = config.dyn_stoch + config.dyn_deter
 
 
   def reset(
@@ -132,15 +148,77 @@ class DubinsCarDyn(object):
     Returns:
         np.ndarray: the state that Dubins car has been reset to.
     """
-    if start is None:
-      x_rnd, y_rnd, theta_rnd = self.sample_random_state(
-          sample_inside_obs=sample_inside_obs,
-          sample_inside_tar=sample_inside_tar, theta=theta
-      )
-      self.state = np.array([x_rnd, y_rnd, theta_rnd])
+    if not self.use_wm:
+      if start is None:
+        x_rnd, y_rnd, theta_rnd = self.sample_random_state(
+            sample_inside_obs=sample_inside_obs,
+            sample_inside_tar=sample_inside_tar, theta=theta
+        )
+        self.state = np.array([x_rnd, y_rnd, theta_rnd])
+      else:
+        self.state = start
+      return np.copy(self.state)
     else:
-      self.state = start
-    return np.copy(self.state)
+      latent, gt_state = self.sample_random_state(
+            sample_inside_obs=sample_inside_obs,
+            sample_inside_tar=sample_inside_tar, theta=theta
+        )
+      self.state = gt_state
+      self.latent = latent
+      return latent.copy(), np.copy(gt_state)
+
+  def get_latent(self, xs, ys, thetas, imgs):
+    states = np.expand_dims(np.expand_dims(thetas,1),1)
+    imgs = np.expand_dims(imgs, 1)
+    dummy_acs = np.zeros((np.shape(xs)[0], 1, 3))
+    rand_idx = 1 #go straight #np.random.randint(0, 3, np.shape(xs)[0])
+    dummy_acs[np.arange(np.shape(xs)[0]), :, rand_idx] = 1
+    firsts = np.ones((np.shape(xs)[0], 1))
+    lasts = np.zeros((np.shape(xs)[0], 1))
+    
+    cos = np.cos(states)
+    sin = np.sin(states)
+
+    states = np.concatenate([cos, sin], axis=-1)
+
+
+    chunks = 21
+    if np.shape(imgs)[0] > chunks:
+      bs = int(np.shape(imgs)[0]/chunks)
+    else:
+      bs = int(np.shape(imgs)[0]/chunks)
+    
+    for i in range(chunks):
+      if i == chunks-1:
+        data = {'obs_state': states[i*bs:], 'image': imgs[i*bs:], 'action': dummy_acs[i*bs:], 'is_first': firsts[i*bs:], 'is_terminal': lasts[i*bs:]}
+      else:
+        data = {'obs_state': states[i*bs:(i+1)*bs], 'image': imgs[i*bs:(i+1)*bs], 'action': dummy_acs[i*bs:(i+1)*bs], 'is_first': firsts[i*bs:(i+1)*bs], 'is_terminal': lasts[i*bs:(i+1)*bs]}
+
+      data = self.wm.preprocess(data)
+      embeds = self.encoder(data)
+      if i == 0:
+        embed = embeds
+      else:
+        embed = torch.cat([embed, embeds], dim=0)
+
+    
+    #data = {'obs_state': states, 'image': imgs, 'action': dummy_acs, 'is_first': firsts, 'is_terminal': lasts}
+#
+    #data = self.wm.preprocess(data)
+    #embed = self.encoder(data)
+    data = {'obs_state': states, 'image': imgs, 'action': dummy_acs, 'is_first': firsts, 'is_terminal': lasts}
+    data = self.wm.preprocess(data)
+    post, prior = self.wm.dynamics.observe(
+        embed, data["action"], data["is_first"]
+        )
+    if self.gt_lx:
+      raise Exception('Not implemented')
+      #g_x = self.gt_safety_margin(np.array([xs, ys]))
+    else:
+      g_x = self.safety_margin(post)
+
+    feat = self.wm.dynamics.get_feat(post).detach().cpu().numpy().squeeze()
+    return g_x, feat, post
 
   def sample_random_state(
       self, sample_inside_obs=False, sample_inside_tar=True, theta=None
@@ -173,9 +251,49 @@ class DubinsCarDyn(object):
         img = torch.tensor([img/256.]).float().to(self.device)
         embed = self.encoder(img, torch.tensor([theta_rnd]).float().to(self.device)).detach().cpu().numpy().squeeze()
         g_x = self.safety_margin(embed)
+      if self.use_wm:
+        state0 = np.array([rnd_state[0], rnd_state[1], theta_rnd])
+        img0 = self.get_image(rnd_state, theta_rnd)
+        rand_u0 = np.zeros(3)
+        rand_int0 = 1 #np.random.randint(0, 3)
+        rand_u0[rand_int0] = 1  
+        state1 = self.integrate_forward(state0, self.discrete_controls[rand_int0])
+
+        img1 = self.get_image(state1[:2], state1[2])
+        rand_u1 = np.zeros(3)
+        rand_int1 = np.random.randint(0, 3)
+        rand_u1[rand_int1] = 1  
+
+        state2 = self.integrate_forward(state1, self.discrete_controls[rand_int1])
+        #img2 = self.get_image(state2[:2], state2[2])
+        #rand_u2 = np.zeros(3)
+        #rand_int2 = np.random.randint(0, 3)
+        #rand_u2[rand_int2] = 1  
+
+        #data = {'obs_state': [[[state0[-1]], [state1[-1]]]], 'image': [[img0, img1]], 'action': [[rand_u0, rand_u1]], 'is_first': np.array([[[True], [False]]]), 'is_terminal': np.array([[[False], [False]]])}
+        #for k, v in data.items():
+        #  print(np.shape(data[k]))
+        data = {'obs_state': [[[np.cos(state0[-1]), np.sin(state0[-1])]]], 'image': [[img0]], 'action': [[rand_u0]], 'is_first': np.array([[[True]]]), 'is_terminal': np.array([[[False]]])}
+
+        data = self.wm.preprocess(data)
+        embed = self.encoder(data)
+
+        post, prior = self.wm.dynamics.observe(
+            embed, data["action"], data["is_first"]
+            )
+        #post = {k: v[:, [-1]] for k, v in post.items()}
+        
+        if self.gt_lx:
+          raise Exception('Not implemented')
+          g_x = self.gt_safety_margin(state1)
+        else:
+          g_x = self.safety_margin(post)
+
       else:
         #l_x = self.target_margin(rnd_state)
         g_x = self.safety_margin(rnd_state)
+
+      
 
       #if (not sample_inside_obs) and (g_x > 0):
       if (not sample_inside_obs) and (g_x < 0):
@@ -187,8 +305,10 @@ class DubinsCarDyn(object):
     x_rnd, y_rnd = rnd_state
     if self.image:
       x_rnd, y_rnd, theta_rnd = embed[0], embed[1], embed[2]
-    
-    return x_rnd, y_rnd, theta_rnd
+    if self.use_wm:
+      return post, state1
+    else:
+      return x_rnd, y_rnd, theta_rnd
 
   def get_image(self, state, theta):
     x, y = state
@@ -196,13 +316,14 @@ class DubinsCarDyn(object):
     plt.xlim([-1.1, 1.1])
     plt.ylim([-1.1, 1.1])
     plt.axis('off')
-    dpi=64
+    dpi=128
     fig.set_size_inches( 1, 1 )
     # Create the circle patch
     circle = patches.Circle((0,0), (0.5), edgecolor=(1,0,0), facecolor='none')
     # Add the circle patch to the axis
     ax.add_patch(circle)
     plt.quiver(x, y, self.time_step*self.speed*math.cos(theta), self.time_step*self.speed*math.sin(theta), angles='xy', scale_units='xy', minlength=0,width=0.05, scale=0.2,color=(0,0,1), zorder=3)
+    #plt.scatter(x, y, s=10, c=(0,0,1), zorder=3)
     plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
     buf = io.BytesIO()
@@ -227,9 +348,27 @@ class DubinsCarDyn(object):
         np.ndarray: next state.
         bool: True if the episode is terminated.
     """
-    l_x_cur = self.target_margin(self.state[:2])
-    g_x_cur = self.safety_margin(self.state[:2])
+    if type(action) == dict:
+      action = np.argmax(action[ 'action' ])
 
+    # step latent state
+    if self.use_wm:
+      if self.gt_lx:
+        raise Exception('Not implemented')
+        g_x_cur = self.gt_safety_margin(self.state[:2])
+      else:
+        g_x_cur = self.safety_margin(self.latent)
+
+      img_ac = torch.zeros(3).to(self.device)
+      img_ac[action] = 1
+      img_ac = img_ac.unsqueeze(0).unsqueeze(0)
+      
+      init = {k: v[:, -1] for k, v in self.latent.items()}
+      self.latent = self.wm.dynamics.imagine_with_action(img_ac, init)
+    else:
+      g_x_cur = self.safety_margin(self.state[:2])
+
+    # step gt state
     u = self.discrete_controls[action]
     state = self.integrate_forward(self.state, u)
     self.state = state
@@ -244,7 +383,10 @@ class DubinsCarDyn(object):
     if done:
       self.alive = False
 
-    return np.copy(self.state), done
+    if self.use_wm: 
+      return self.latent.copy(), np.copy(self.state), done # need latent 
+    else:
+      return np.copy(self.state), done
 
   def integrate_forward(self, state, u):
     """Integrates the dynamics forward by one step.
@@ -265,10 +407,12 @@ class DubinsCarDyn(object):
       delta[2] *= self.max_turning_rate*self.time_step
       state_next = state + delta
       state_next[2] = np.mod(state_next[2], 2 * np.pi)
+      exit()
     else:
       x = x + self.time_step * self.speed * np.cos(theta)
       y = y + self.time_step * self.speed * np.sin(theta)
       theta = np.mod(theta + self.time_step * u, 2 * np.pi)
+      assert theta >= 0 and theta < 2 * np.pi
       state_next = np.array([x, y, theta])
       
     return state_next
@@ -388,14 +532,24 @@ class DubinsCarDyn(object):
         float: postivive numbers indicate being inside the failure set (safety
             violation).
     """
-    x, y = (self.low + self.high)[:2] / 2.0
+    '''x, y = (self.low + self.high)[:2] / 2.0
     w, h = (self.high - self.low)[:2]
     boundary_margin = calculate_margin_rect(
         s, [x, y, w, h], negativeInside=True
     )
-    g_xList = [boundary_margin]
+    g_xList = [boundary_margin]'''
+    g_xList = []
+    if self.gt_lx:
+      raise Exception('Not implemented')
 
-    if self.learned_margin:
+      return self.gt_safety_margin(s)
+    elif self.use_wm:
+      self.MLP_margin.eval()
+      feat = self.wm.dynamics.get_feat(s).detach()
+      with torch.no_grad():  # Disable gradient calculation
+        outputs = self.MLP_margin(feat)
+        g_xList.append(outputs.detach().cpu().numpy())
+    elif self.learned_margin:
       s_tensor = torch.Tensor([s[0], s[1], 0])
       with torch.no_grad():  # Disable gradient calculation
         outputs = self.MLP_margin(s_tensor.to(self.device)).item()
@@ -410,7 +564,38 @@ class DubinsCarDyn(object):
         )
         g_xList.append(g_x)
     
-    safety_margin = np.max(np.array(g_xList))
+    #safety_margin = np.max(np.array(g_xList))
+    safety_margin = np.array(g_xList).squeeze()
+
+    return self.safetyScaling * safety_margin
+  
+  def gt_safety_margin(self, s):
+    """Computes the margin (e.g. distance) between the state and the failue set.
+
+    Args:
+        s (np.ndarray): the state of the agent.
+
+    Returns:
+        float: postivive numbers indicate being inside the failure set (safety
+            violation).
+    """
+    '''x, y = (self.low + self.high)[:2] / 2.0
+    w, h = (self.high - self.low)[:2]
+    boundary_margin = calculate_margin_rect(
+        s, [x, y, w, h], negativeInside=True
+    )
+    g_xList = [boundary_margin]'''
+    g_xList = []
+    c_c_exists = (self.constraint_center is not None)
+    c_r_exists = (self.constraint_radius is not None)
+    if (c_c_exists and c_r_exists):
+      g_x = calculate_margin_circle(
+          s, [self.constraint_center, self.constraint_radius],
+          negativeInside=True
+      )
+      g_xList.append(g_x)
+    
+    safety_margin = np.array(g_xList).squeeze()
 
     return self.safetyScaling * safety_margin
 

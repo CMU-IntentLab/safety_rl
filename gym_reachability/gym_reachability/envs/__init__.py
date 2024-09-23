@@ -11,6 +11,7 @@ from .multi_player_lunar_lander_reachability import (
 from .one_player_reach_avoid_lunar_lander import OnePlayerReachAvoidLunarLander
 
 from .dubins_car_one import DubinsCarOneEnv
+from .dubins_car_one_img import DubinsCarOneEnvImg
 
 from .dubins_car_pe import DubinsCarPEEnv
 
